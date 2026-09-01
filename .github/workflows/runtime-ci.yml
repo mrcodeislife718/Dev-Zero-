@@ -12,7 +12,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm install
       - run: npm run check
