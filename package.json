@@ -1,0 +1,14 @@
+{
+  "name": "dev-zero-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "dev-zero": "./bin/dev-zero.js" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node --check src/runtime.js && node --check src/server.js && node --check bin/dev-zero.js && npm test"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": { "better-sqlite3": "^11.8.1" }
+}
