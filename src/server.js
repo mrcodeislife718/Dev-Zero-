@@ -36,7 +36,7 @@ export const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/workers') return send(res, 201, runtime.createWorker(await readJson(req)));
     let match;
     if ((match = url.pathname.match(/^\/v1\/workers\/([^/]+)\/provider-sessions$/)) && req.method === 'POST') return send(res, 201, runtime.bindProviderSession(decodeURIComponent(match[1]), await readJson(req)));
-    if (req.method === 'POST' && url.pathname === '/v1/tasks') return send(res, 201, runtime.createTask(await readJson(req)));
+    if (req.method === 'POST' && url.pathname === '/v1/tasks') return send(res, 201, await runtime.createTask(await readJson(req)));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)) && req.method === 'GET') {
       const task = runtime.getTask(decodeURIComponent(match[1]));
       return task ? send(res, 200, task) : send(res, 404, { error: 'not_found' });
@@ -46,8 +46,8 @@ export const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       return send(res, 200, await runtime.executeCommand(decodeURIComponent(match[1]), body.intent, { approved: body.approved === true }));
     }
-    if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/checkpoint$/)) && req.method === 'POST') return send(res, 201, runtime.checkpoint(decodeURIComponent(match[1])));
-    if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/rollback$/)) && req.method === 'POST') return send(res, 200, runtime.rollback(decodeURIComponent(match[1])));
+    if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/checkpoint$/)) && req.method === 'POST') return send(res, 201, await runtime.checkpointWithLineage(decodeURIComponent(match[1])));
+    if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/rollback$/)) && req.method === 'POST') return send(res, 200, await runtime.rollbackWithLineage(decodeURIComponent(match[1])));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/complete$/)) && req.method === 'POST') return send(res, 200, await runtime.completeTask(decodeURIComponent(match[1])));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/evidence$/)) && req.method === 'GET') return send(res, 200, { evidence: runtime.evidence(decodeURIComponent(match[1])) });
     if ((match = url.pathname.match(/^\/v1\/commands\/([^/]+)\/cancel$/)) && req.method === 'POST') return send(res, runtime.cancelCommand(decodeURIComponent(match[1])) ? 200 : 404, { cancelled: true });
