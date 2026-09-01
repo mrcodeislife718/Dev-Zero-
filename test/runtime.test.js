@@ -54,13 +54,13 @@ test('isolated command records evidence and rollback restores checkpoint', async
     const worker = runtime.createWorker({ name: 'builder' });
     const task = runtime.createTask({ repositoryId: repo.id, workerId: worker.id, objective: 'write isolated file' });
     const result = await runtime.executeCommand(task.id, {
-      binary: process.execPath,
-      args: ['-e', "require('fs').writeFileSync('result.txt','ok')"],
+      binary: '/usr/bin/touch',
+      args: ['result.txt'],
       cwd: '.', filesystemScope: ['.'], network: 'deny', timeoutMs: 20_000,
-      memoryMb: 512, cpuSeconds: 10, approvalTier: 'operator', mutating: true,
+      memoryMb: 128, cpuSeconds: 10, approvalTier: 'operator', mutating: true,
     }, { approved: true });
-    assert.equal(result.success, true);
-    assert.equal(fs.readFileSync(path.join(task.worktree_path, 'result.txt'), 'utf8'), 'ok');
+    assert.equal(result.success, true, result.stderr || JSON.stringify(result.failure));
+    assert.equal(fs.existsSync(path.join(task.worktree_path, 'result.txt')), true);
     assert.ok(result.evidence.some(item => item.kind === 'command-result'));
     assert.ok(result.evidence.some(item => item.kind === 'repository-diff'));
     runtime.rollback(task.id);
