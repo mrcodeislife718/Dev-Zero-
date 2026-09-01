@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { DevZeroRuntime } from './runtime.js';
+import { IntegratedDevZeroRuntime } from './integrations.js';
 
-const runtime = new DevZeroRuntime();
+const runtime = new IntegratedDevZeroRuntime();
 const tokenPath = path.join(runtime.home, 'LOCAL_AUTH_TOKEN');
 if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, `${crypto.randomBytes(48).toString('base64url')}\n`, { mode: 0o600 });
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
@@ -48,7 +48,7 @@ export const server = http.createServer(async (req, res) => {
     }
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/checkpoint$/)) && req.method === 'POST') return send(res, 201, runtime.checkpoint(decodeURIComponent(match[1])));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/rollback$/)) && req.method === 'POST') return send(res, 200, runtime.rollback(decodeURIComponent(match[1])));
-    if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/complete$/)) && req.method === 'POST') return send(res, 200, runtime.completeTask(decodeURIComponent(match[1])));
+    if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/complete$/)) && req.method === 'POST') return send(res, 200, await runtime.completeTask(decodeURIComponent(match[1])));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/evidence$/)) && req.method === 'GET') return send(res, 200, { evidence: runtime.evidence(decodeURIComponent(match[1])) });
     if ((match = url.pathname.match(/^\/v1\/commands\/([^/]+)\/cancel$/)) && req.method === 'POST') return send(res, runtime.cancelCommand(decodeURIComponent(match[1])) ? 200 : 404, { cancelled: true });
     return send(res, 404, { error: 'not_found' });
