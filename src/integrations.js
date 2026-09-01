@@ -42,20 +42,23 @@ export class IntegratedDevZeroRuntime extends DevZeroRuntime {
     return body;
   }
 
-  createTask(input) {
+  async createTask(input) {
     const task = super.createTask(input);
     this.db.prepare('insert into task_integrations(task_id,sessions_session_id,sessions_correlation_id) values(?,?,?)').run(task.id, input.sessionsSessionId || null, input.sessionsCorrelationId || task.id);
     const worker = this.db.prepare('select * from workers where id=?').get(task.worker_id);
     if (input.sessionsSessionId && this.sessionsUrl && this.sessionsToken) {
-      this.emitTaskEvent(task.id, 'TaskCreated', { taskId: task.id, objectiveId: input.objectiveId || null, summary: task.objective }).then(() =>
-        this.emitTaskEvent(task.id, 'WorkerAssigned', { taskId: task.id, logicalWorkerId: task.worker_id, role: worker.role, metadata: { axionIdentityId: worker.axion_identity_id || null } })
-      ).then(async () => {
+      try {
+        await this.emitTaskEvent(task.id, 'TaskCreated', { taskId: task.id, objectiveId: input.objectiveId || null, summary: task.objective });
+        await this.emitTaskEvent(task.id, 'WorkerAssigned', { taskId: task.id, logicalWorkerId: task.worker_id, role: worker.role, metadata: { axionIdentityId: worker.axion_identity_id || null } });
         if (task.provider_session_id) {
           const provider = this.db.prepare('select * from provider_sessions where id=?').get(task.provider_session_id);
           if (provider) await this.emitTaskEvent(task.id, 'ProviderSessionBound', { taskId: task.id, logicalWorkerId: task.worker_id, providerSessionId: provider.id, provider: provider.provider, model: provider.model });
         }
         await this.emitTaskEvent(task.id, 'WorktreeCreated', { taskId: task.id, worktree: task.worktree_path, branch: task.branch_name, checkpointId: task.checkpoint_sha });
-      }).catch(error => this.recordEvidence(task.id, null, 'lineage-delivery-failure', { message: error.message }));
+      } catch (error) {
+        this.recordEvidence(task.id, null, 'lineage-delivery-failure', { message: error.message });
+        throw error;
+      }
     }
     return { ...task, axion_identity_id: worker.axion_identity_id || null };
   }
@@ -64,10 +67,15 @@ export class IntegratedDevZeroRuntime extends DevZeroRuntime {
     const task = this.getTask(taskId);
     await this.emitTaskEvent(taskId, 'AuthorityEvaluated', { taskId, authorityDecision: options.approved || intent.approvalTier === 'none' ? 'allowed' : 'approval_required', commandClass: intent.commandClass || intent.binary });
     try {
-      const result = await super.executeCommand(taskId, intent, options);
+      const result = await super.executeCommand(taskId, { ...intent, rollbackOnFailure: false }, options);
       await this.emitTaskEvent(taskId, 'CommandExecuted', { taskId, logicalWorkerId: task.worker_id, commandClass: intent.commandClass || intent.binary, tool: intent.binary, args: intent.args, evidenceIds: result.evidence.map(item => item.id), outcome: result.success ? 'success' : 'failed', failureCategory: result.failure?.category, retryable: result.failure?.retryable, replanRequired: result.failure?.replanRequired, rollbackRequired: result.failure?.rollbackRequired });
       if (intent.commandClass === 'test') await this.emitTaskEvent(taskId, 'TestExecuted', { taskId, logicalWorkerId: task.worker_id, evidenceIds: result.evidence.map(item => item.id), outcome: result.success ? 'passed' : 'failed' });
-      if (!result.success) await this.emitTaskEvent(taskId, 'TaskFailed', { taskId, logicalWorkerId: task.worker_id, evidenceIds: result.evidence.map(item => item.id), failureCategory: result.failure?.category, outcome: 'failed' });
+      if (!result.success && intent.mutating && intent.rollbackOnFailure !== false) {
+        await this.emitTaskEvent(taskId, 'RollbackTriggered', { taskId, summary: 'Dev-Zero rollback after failed mutating command' });
+        const rollbackEvidence = super.rollback(taskId);
+        await this.emitTaskEvent(taskId, 'RollbackCompleted', { taskId, checkpointId: rollbackEvidence.payload.checkpointSha, evidenceIds: [rollbackEvidence.id] });
+      }
+      if (!result.success) await this.emitTaskEvent(taskId, 'TaskFailed', { taskId, logicalWorkerId: task.worker_id, evidenceIds: this.evidence(taskId).map(item => item.id), failureCategory: result.failure?.category, outcome: 'failed' });
       return result;
     } catch (error) {
       await this.emitTaskEvent(taskId, 'TaskFailed', { taskId, logicalWorkerId: task.worker_id, evidenceIds: this.evidence(taskId).map(item => item.id), failureCategory: 'runtime', outcome: error.message });
@@ -75,16 +83,16 @@ export class IntegratedDevZeroRuntime extends DevZeroRuntime {
     }
   }
 
-  checkpoint(taskId) {
+  async checkpointWithLineage(taskId) {
     const evidence = super.checkpoint(taskId);
-    this.emitTaskEvent(taskId, 'SnapshotCreated', { taskId, checkpointId: evidence.payload.sha, evidenceIds: [evidence.id] }).catch(error => this.recordEvidence(taskId, null, 'lineage-delivery-failure', { message: error.message }));
+    await this.emitTaskEvent(taskId, 'SnapshotCreated', { taskId, checkpointId: evidence.payload.sha, evidenceIds: [evidence.id] });
     return evidence;
   }
 
-  rollback(taskId) {
-    this.emitTaskEvent(taskId, 'RollbackTriggered', { taskId, summary: 'Dev-Zero rollback requested' }).catch(() => undefined);
+  async rollbackWithLineage(taskId) {
+    await this.emitTaskEvent(taskId, 'RollbackTriggered', { taskId, summary: 'Dev-Zero rollback requested' });
     const evidence = super.rollback(taskId);
-    this.emitTaskEvent(taskId, 'RollbackCompleted', { taskId, checkpointId: evidence.payload.checkpointSha, evidenceIds: [evidence.id] }).catch(error => this.recordEvidence(taskId, null, 'lineage-delivery-failure', { message: error.message }));
+    await this.emitTaskEvent(taskId, 'RollbackCompleted', { taskId, checkpointId: evidence.payload.checkpointSha, evidenceIds: [evidence.id] });
     return evidence;
   }
 
