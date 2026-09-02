@@ -5,9 +5,11 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { IntegratedDevZeroRuntime } from './integrations.js';
 import { DurableCommandJournal } from './command-journal.js';
+import { TeamCoordinator } from './team-coordinator.js';
 
 const runtime = new IntegratedDevZeroRuntime();
 const journal = new DurableCommandJournal(runtime);
+const team = new TeamCoordinator(runtime);
 const tokenPath = path.join(runtime.home, 'LOCAL_AUTH_TOKEN');
 if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, `${crypto.randomBytes(48).toString('base64url')}\n`, { mode: 0o600 });
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
@@ -30,6 +32,10 @@ const capabilities = Object.freeze({
   networkIsolation: enforceableNetworkIsolation,
   resourceLimits: enforceableResourceLimits,
   rollback: true,
+  durableTeamMissions: true,
+  dependencyScheduling: true,
+  independentVerification: true,
+  workerLeases: true,
 });
 
 function safeEqual(a, b) {
@@ -62,6 +68,28 @@ export const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/workers') return send(res, 201, runtime.createWorker(await readJson(req)));
     let match;
     if ((match = url.pathname.match(/^\/v1\/workers\/([^/]+)\/provider-sessions$/)) && req.method === 'POST') return send(res, 201, runtime.bindProviderSession(decodeURIComponent(match[1]), await readJson(req)));
+
+    if (req.method === 'POST' && url.pathname === '/v1/missions') return send(res, 201, team.createMission(await readJson(req)));
+    if ((match = url.pathname.match(/^\/v1\/missions\/([^/]+)$/)) && req.method === 'GET') {
+      const mission = team.getMission(decodeURIComponent(match[1]));
+      return mission ? send(res, 200, mission) : send(res, 404, { error:'not_found' });
+    }
+    if ((match = url.pathname.match(/^\/v1\/missions\/([^/]+)\/ready$/)) && req.method === 'GET') return send(res, 200, { tasks: team.readyTasks(decodeURIComponent(match[1]), url.searchParams.get('role')) });
+    if ((match = url.pathname.match(/^\/v1\/missions\/([^/]+)\/claim$/)) && req.method === 'POST') {
+      const body = await readJson(req);
+      const task = team.claimTask(decodeURIComponent(match[1]), body.workerId, { providerSessionId: body.providerSessionId || null, leaseMs: body.leaseMs });
+      return task ? send(res, 200, task) : send(res, 204, {});
+    }
+    if ((match = url.pathname.match(/^\/v1\/mission-tasks\/([^/]+)\/heartbeat$/)) && req.method === 'POST') {
+      const body = await readJson(req); return send(res, 200, team.heartbeat(decodeURIComponent(match[1]), body.workerId, body.leaseMs));
+    }
+    if ((match = url.pathname.match(/^\/v1\/mission-tasks\/([^/]+)\/start$/)) && req.method === 'POST') {
+      const body = await readJson(req); return send(res, 200, team.markExecuting(decodeURIComponent(match[1]), body.workerId));
+    }
+    if ((match = url.pathname.match(/^\/v1\/mission-tasks\/([^/]+)\/verify$/)) && req.method === 'POST') return send(res, 200, team.submitVerification(decodeURIComponent(match[1]), await readJson(req)));
+    if ((match = url.pathname.match(/^\/v1\/mission-tasks\/([^/]+)\/complete$/)) && req.method === 'POST') return send(res, 200, team.completeTask(decodeURIComponent(match[1])));
+    if ((match = url.pathname.match(/^\/v1\/mission-tasks\/([^/]+)\/fail$/)) && req.method === 'POST') return send(res, 200, team.failTask(decodeURIComponent(match[1]), (await readJson(req)).reason));
+
     if (req.method === 'POST' && url.pathname === '/v1/tasks') return send(res, 201, await runtime.createTask(await readJson(req)));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)) && req.method === 'GET') {
       const task = runtime.getTask(decodeURIComponent(match[1]));
