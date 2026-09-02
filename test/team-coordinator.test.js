@@ -41,9 +41,47 @@ test('mission scheduler releases only dependency-ready engineering work', () => 
     const claimed = team.claimTask(mission.id,builder.id); assert.equal(claimed.id,'build'); assert.ok(claimed.runtime_task_id);
     assert.equal(team.readyTasks(mission.id).length,0);
     assert.throws(()=>team.submitVerification('build',{verifierWorkerId:builder.id,status:'passed'}),/independent/);
+    f.runtime.completeTask(claimed.runtime_task_id);
     const verified = team.submitVerification('build',{verifierWorkerId:tester.id,status:'passed'}); assert.equal(verified.verification.status,'passed');
-    f.runtime.completeTask(claimed.runtime_task_id); team.completeTask('build');
+    team.completeTask('build');
     assert.deepEqual(team.readyTasks(mission.id).map(item=>item.id),['test']);
+  } finally { f.runtime.close(); fs.rmSync(f.root,{recursive:true,force:true}); }
+});
+
+test('verification backlog applies backpressure before more engineering work is claimed', () => {
+  const f = fixture();
+  try {
+    const team = new TeamCoordinator(f.runtime);
+    const builder = f.runtime.createWorker({name:'builder',role:'builder'});
+    const mission = team.createMission({
+      repositoryId:f.repo.id,
+      objective:'bound verifier backlog',
+      budget:{maxVerifierBacklog:1},
+      tasks:[
+        {id:'one',role:'builder',objective:'first',requiredVerifierRole:'tester'},
+        {id:'two',role:'builder',objective:'second'},
+      ],
+    });
+    const first = team.claimTask(mission.id,builder.id);
+    f.runtime.completeTask(first.runtime_task_id);
+    assert.equal(team.verificationBacklog(mission.id),1);
+    const admission = team.admissionStatus(mission.id);
+    assert.equal(admission.allowed,false);
+    assert.deepEqual(admission.reasons,['verification-backlog-capacity-reached']);
+    assert.throws(()=>team.claimTask(mission.id,builder.id),/verification-backlog-capacity-reached/);
+  } finally { f.runtime.close(); fs.rmSync(f.root,{recursive:true,force:true}); }
+});
+
+test('mission duration budget blocks new work without destroying existing state', () => {
+  const f = fixture();
+  try {
+    const team = new TeamCoordinator(f.runtime);
+    const builder = f.runtime.createWorker({name:'builder',role:'builder'});
+    const mission = team.createMission({repositoryId:f.repo.id,objective:'bounded mission',budget:{maxMissionDurationMs:1},tasks:[{id:'one',role:'builder',objective:'one'}]});
+    f.runtime.db.prepare("update missions set created_at='2000-01-01T00:00:00.000Z' where id=?").run(mission.id);
+    assert.equal(team.readyTasks(mission.id).length,0);
+    assert.throws(()=>team.claimTask(mission.id,builder.id),/mission-duration-budget-exhausted/);
+    assert.equal(team.getMission(mission.id).status,'active');
   } finally { f.runtime.close(); fs.rmSync(f.root,{recursive:true,force:true}); }
 });
 
