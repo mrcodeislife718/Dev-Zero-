@@ -3,11 +3,21 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { IntegratedDevZeroRuntime } from './integrations.js';
+import { DurableCommandJournal } from './command-journal.js';
 
 const runtime = new IntegratedDevZeroRuntime();
+const journal = new DurableCommandJournal(runtime);
 const tokenPath = path.join(runtime.home, 'LOCAL_AUTH_TOKEN');
 if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, `${crypto.randomBytes(48).toString('base64url')}\n`, { mode: 0o600 });
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
+
+const capabilities = Object.freeze({
+  protocolVersions: [1],
+  idempotentDispatch: true,
+  networkIsolation: true,
+  resourceLimits: true,
+  rollback: true,
+});
 
 function safeEqual(a, b) {
   const left = Buffer.from(String(a || ''));
@@ -25,13 +35,14 @@ async function readJson(req) {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
 function authorized(req) { return safeEqual(req.headers['x-dev-zero-token'], token); }
+function runtimeStatus() { return { ...runtime.status(), capabilities }; }
 
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
-    if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, status: runtime.status() });
+    if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, status: runtimeStatus() });
     if (!authorized(req)) return send(res, 401, { error: 'authentication_required' });
-    if (req.method === 'GET' && url.pathname === '/v1/status') return send(res, 200, runtime.status());
+    if (req.method === 'GET' && url.pathname === '/v1/status') return send(res, 200, runtimeStatus());
     if (req.method === 'POST' && url.pathname === '/v1/repositories') return send(res, 201, runtime.attachRepository((await readJson(req)).rootPath));
     if (req.method === 'POST' && url.pathname === '/v1/workers') return send(res, 201, runtime.createWorker(await readJson(req)));
     let match;
@@ -44,7 +55,11 @@ export const server = http.createServer(async (req, res) => {
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/resume$/)) && req.method === 'POST') return send(res, 200, runtime.resumeTask(decodeURIComponent(match[1]), (await readJson(req)).providerSessionId || null));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/commands$/)) && req.method === 'POST') {
       const body = await readJson(req);
-      return send(res, 200, await runtime.executeCommand(decodeURIComponent(match[1]), body.intent, { approved: body.approved === true }));
+      return send(res, 200, await journal.execute(decodeURIComponent(match[1]), body.intent, { approved: body.approved === true, idempotencyKey: body.idempotencyKey }));
+    }
+    if ((match = url.pathname.match(/^\/v1\/dispatches\/([^/]+)\/reconcile$/)) && req.method === 'POST') {
+      const body = await readJson(req);
+      return send(res, 200, journal.reconcile(decodeURIComponent(match[1]), body.resolution));
     }
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/checkpoint$/)) && req.method === 'POST') return send(res, 201, await runtime.checkpointWithLineage(decodeURIComponent(match[1])));
     if ((match = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/rollback$/)) && req.method === 'POST') return send(res, 200, await runtime.rollbackWithLineage(decodeURIComponent(match[1])));
