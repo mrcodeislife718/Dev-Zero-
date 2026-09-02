@@ -85,6 +85,22 @@ test('mission duration budget blocks new work without destroying existing state'
   } finally { f.runtime.close(); fs.rmSync(f.root,{recursive:true,force:true}); }
 });
 
+test('live host memory reserve blocks fan-out before the machine is overcommitted', () => {
+  const f = fixture();
+  try {
+    const team = new TeamCoordinator(f.runtime);
+    const builder=f.runtime.createWorker({name:'builder',role:'builder'});
+    const impossibleReserveMb=Math.ceil(os.totalmem()/(1024*1024))+1024;
+    const mission=team.createMission({repositoryId:f.repo.id,objective:'respect host capacity',budget:{minFreeMemoryMb:impossibleReserveMb},tasks:[{id:'one',role:'builder',objective:'one'}]});
+    const admission=team.admissionStatus(mission.id);
+    assert.equal(admission.allowed,false);
+    assert.ok(admission.host.freeMemoryMb > 0);
+    assert.ok(admission.reasons.includes('host-free-memory-reserve-reached'));
+    assert.throws(()=>team.claimTask(mission.id,builder.id),/host-free-memory-reserve-reached/);
+    assert.equal(f.runtime.db.prepare('select count(*) n from tasks').get().n,0);
+  } finally { f.runtime.close(); fs.rmSync(f.root,{recursive:true,force:true}); }
+});
+
 test('expired worker lease returns unfinished work to schedulable state', () => {
   const f = fixture();
   try {
