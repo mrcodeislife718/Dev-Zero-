@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import os from 'node:os';
 
 const now = () => new Date().toISOString();
 const uid = prefix => `${prefix}_${crypto.randomUUID()}`;
@@ -94,6 +95,8 @@ export class TeamCoordinator {
       maxAttemptsPerTask: Math.max(1, positiveOrZero(budget.maxAttemptsPerTask, 3)),
       maxMissionDurationMs: positiveOrZero(budget.maxMissionDurationMs, 0),
       maxVerifierBacklog: positiveOrZero(budget.maxVerifierBacklog, 0),
+      minFreeMemoryMb: positiveOrZero(budget.minFreeMemoryMb, 0),
+      maxLoadPerCpu: positiveOrZero(budget.maxLoadPerCpu, 0),
     };
     const mission = { id: uid('mission'), repository_id: repositoryId, objective: objective.trim(), status: 'active', acceptance_json: JSON.stringify(criteria), budget_json: JSON.stringify(missionBudget), created_at: created, updated_at: created };
     const transaction = this.db.transaction(() => {
@@ -134,18 +137,30 @@ export class TeamCoordinator {
     return Number(row?.n || 0);
   }
 
+  hostCapacity() {
+    const cpuCount=Math.max(1,os.cpus().length);
+    const freeMemoryMb=os.freemem()/(1024*1024);
+    const load1=process.platform === 'win32' ? 0 : os.loadavg()[0] || 0;
+    return { cpuCount, freeMemoryMb, load1, loadPerCpu:load1/cpuCount };
+  }
+
   admissionStatus(missionId) {
     const mission = this.getMission(missionId);
-    if (!mission) return { allowed:false, reasons:['mission-not-found'], verificationBacklog:0, elapsedMs:0 };
+    if (!mission) return { allowed:false, reasons:['mission-not-found'], verificationBacklog:0, elapsedMs:0, host:this.hostCapacity() };
     const elapsedMs = Math.max(0, Date.now() - Date.parse(mission.created_at));
     const verificationBacklog = this.verificationBacklog(missionId);
+    const host=this.hostCapacity();
     const reasons = [];
     const maxDuration = positiveOrZero(mission.budget.maxMissionDurationMs, 0);
     const maxVerifierBacklog = positiveOrZero(mission.budget.maxVerifierBacklog, 0);
+    const minFreeMemoryMb=positiveOrZero(mission.budget.minFreeMemoryMb,0);
+    const maxLoadPerCpu=positiveOrZero(mission.budget.maxLoadPerCpu,0);
     if (mission.status !== 'active') reasons.push(`mission-${mission.status}`);
     if (maxDuration > 0 && elapsedMs >= maxDuration) reasons.push('mission-duration-budget-exhausted');
     if (maxVerifierBacklog > 0 && verificationBacklog >= maxVerifierBacklog) reasons.push('verification-backlog-capacity-reached');
-    return { allowed:reasons.length === 0, reasons, verificationBacklog, elapsedMs };
+    if (minFreeMemoryMb > 0 && host.freeMemoryMb < minFreeMemoryMb) reasons.push('host-free-memory-reserve-reached');
+    if (maxLoadPerCpu > 0 && host.loadPerCpu >= maxLoadPerCpu) reasons.push('host-cpu-load-capacity-reached');
+    return { allowed:reasons.length === 0, reasons, verificationBacklog, elapsedMs, host };
   }
 
   readyTasks(missionId, role = null) {
