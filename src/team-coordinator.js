@@ -4,6 +4,7 @@ const now = () => new Date().toISOString();
 const uid = prefix => `${prefix}_${crypto.randomUUID()}`;
 
 function parseJson(value, fallback) { try { return value == null ? fallback : JSON.parse(value); } catch { return fallback; } }
+function positiveOrZero(value, fallback = 0) { const number = Number(value ?? fallback); return Number.isFinite(number) && number >= 0 ? number : fallback; }
 
 export class TeamCoordinator {
   constructor(runtime, { defaultLeaseMs = 120_000 } = {}) {
@@ -88,7 +89,13 @@ export class TeamCoordinator {
     const criterionIds = new Set(criteria.map(item => item.id));
     for (const task of tasks) for (const id of task.criterionIds || []) if (!criterionIds.has(id)) throw new Error(`unknown mission acceptance criterion: ${id}`);
     const created = now();
-    const mission = { id: uid('mission'), repository_id: repositoryId, objective: objective.trim(), status: 'active', acceptance_json: JSON.stringify(criteria), budget_json: JSON.stringify({ maxActiveWorkers: Number(budget.maxActiveWorkers || this.runtime.maxActiveTasks), maxAttemptsPerTask: Number(budget.maxAttemptsPerTask || 3) }), created_at: created, updated_at: created };
+    const missionBudget = {
+      maxActiveWorkers: Math.max(1, positiveOrZero(budget.maxActiveWorkers, this.runtime.maxActiveTasks)),
+      maxAttemptsPerTask: Math.max(1, positiveOrZero(budget.maxAttemptsPerTask, 3)),
+      maxMissionDurationMs: positiveOrZero(budget.maxMissionDurationMs, 0),
+      maxVerifierBacklog: positiveOrZero(budget.maxVerifierBacklog, 0),
+    };
+    const mission = { id: uid('mission'), repository_id: repositoryId, objective: objective.trim(), status: 'active', acceptance_json: JSON.stringify(criteria), budget_json: JSON.stringify(missionBudget), created_at: created, updated_at: created };
     const transaction = this.db.transaction(() => {
       this.db.prepare('insert into missions(id,repository_id,objective,status,acceptance_json,budget_json,created_at,updated_at) values(@id,@repository_id,@objective,@status,@acceptance_json,@budget_json,@created_at,@updated_at)').run(mission);
       const insert = this.db.prepare('insert into mission_tasks(id,mission_id,title,role,status,objective,dependencies_json,criterion_ids_json,required_verifier_role,created_at,updated_at) values(?,?,?,?,?,?,?,?,?,?,?)');
@@ -113,10 +120,39 @@ export class TeamCoordinator {
     return task.dependencies.every(id => byId.get(id)?.status === 'completed');
   }
 
+  verificationBacklog(missionId) {
+    const row = this.db.prepare(`
+      select count(*) n
+      from mission_tasks mt
+      join tasks rt on rt.id = mt.runtime_task_id
+      where mt.mission_id=?
+        and mt.required_verifier_role is not null
+        and mt.verification_json is null
+        and mt.status in ('leased','executing','verifying')
+        and rt.status='completed'
+    `).get(missionId);
+    return Number(row?.n || 0);
+  }
+
+  admissionStatus(missionId) {
+    const mission = this.getMission(missionId);
+    if (!mission) return { allowed:false, reasons:['mission-not-found'], verificationBacklog:0, elapsedMs:0 };
+    const elapsedMs = Math.max(0, Date.now() - Date.parse(mission.created_at));
+    const verificationBacklog = this.verificationBacklog(missionId);
+    const reasons = [];
+    const maxDuration = positiveOrZero(mission.budget.maxMissionDurationMs, 0);
+    const maxVerifierBacklog = positiveOrZero(mission.budget.maxVerifierBacklog, 0);
+    if (mission.status !== 'active') reasons.push(`mission-${mission.status}`);
+    if (maxDuration > 0 && elapsedMs >= maxDuration) reasons.push('mission-duration-budget-exhausted');
+    if (maxVerifierBacklog > 0 && verificationBacklog >= maxVerifierBacklog) reasons.push('verification-backlog-capacity-reached');
+    return { allowed:reasons.length === 0, reasons, verificationBacklog, elapsedMs };
+  }
+
   readyTasks(missionId, role = null) {
     this.recoverExpiredLeases();
     const mission = this.getMission(missionId);
     if (!mission || mission.status !== 'active') return [];
+    if (!this.admissionStatus(missionId).allowed) return [];
     const byId = new Map(mission.tasks.map(task => [task.id, task]));
     return mission.tasks.filter(task => task.status === 'pending' && (!role || task.role === role) && this.dependencyReady(task, byId));
   }
@@ -128,6 +164,8 @@ export class TeamCoordinator {
     if (!worker) throw new Error('active worker not found');
     const mission = this.getMission(missionId);
     if (!mission || mission.status !== 'active') throw new Error('active mission not found');
+    const admission = this.admissionStatus(missionId);
+    if (!admission.allowed) throw new Error(`mission admission blocked: ${admission.reasons.join(', ')}`);
     if (this.activeMissionWorkers(missionId) >= Math.min(Number(mission.budget.maxActiveWorkers || this.runtime.maxActiveTasks), this.runtime.maxActiveTasks)) throw new Error('mission worker capacity reached');
     const candidate = this.readyTasks(missionId, worker.role)[0] || this.readyTasks(missionId)[0];
     if (!candidate) return null;
@@ -161,6 +199,8 @@ export class TeamCoordinator {
     if (!verifier) throw new Error('active verifier not found');
     if (verifierWorkerId === task.worker_id) throw new Error('task verifier must be independent from builder');
     if (task.required_verifier_role && verifier.role !== task.required_verifier_role) throw new Error(`task requires verifier role ${task.required_verifier_role}`);
+    const runtimeTask = this.runtime.getTask(task.runtime_task_id);
+    if (!runtimeTask || runtimeTask.status !== 'completed') throw new Error('runtime task must be completed before verification');
     const validEvidence = new Set(this.runtime.evidence(task.runtime_task_id).map(item => item.id));
     for (const id of evidenceIds) if (!validEvidence.has(id)) throw new Error(`verification evidence does not belong to runtime task: ${id}`);
     const verification = { verifierWorkerId, verifierRole: verifier.role, status: status === 'passed' ? 'passed' : 'failed', evidenceIds, notes, at: now() };
