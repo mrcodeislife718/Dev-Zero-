@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { IntegratedDevZeroRuntime } from './integrations.js';
 import { DurableCommandJournal } from './command-journal.js';
 
@@ -11,11 +12,23 @@ const tokenPath = path.join(runtime.home, 'LOCAL_AUTH_TOKEN');
 if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, `${crypto.randomBytes(48).toString('base64url')}\n`, { mode: 0o600 });
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
 
+function probeNetworkIsolation() {
+  if (process.platform !== 'linux') return false;
+  const result = spawnSync('bwrap', ['--die-with-parent','--new-session','--ro-bind','/','/','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--unshare-net','--','/usr/bin/true'], { encoding:'utf8', timeout:5000 });
+  return result.status === 0;
+}
+function probeResourceLimits() {
+  if (process.platform !== 'linux') return false;
+  const result = spawnSync('prlimit', ['--as=67108864','--cpu=1','--','/usr/bin/true'], { encoding:'utf8', timeout:5000 });
+  return result.status === 0;
+}
+const enforceableNetworkIsolation = probeNetworkIsolation();
+const enforceableResourceLimits = probeResourceLimits();
 const capabilities = Object.freeze({
   protocolVersions: [1],
   idempotentDispatch: true,
-  networkIsolation: true,
-  resourceLimits: true,
+  networkIsolation: enforceableNetworkIsolation,
+  resourceLimits: enforceableResourceLimits,
   rollback: true,
 });
 
@@ -35,7 +48,9 @@ async function readJson(req) {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
 function authorized(req) { return safeEqual(req.headers['x-dev-zero-token'], token); }
-function runtimeStatus() { return { ...runtime.status(), capabilities }; }
+function runtimeStatus() {
+  return { ...runtime.status(), isolation: enforceableNetworkIsolation ? 'bubblewrap' : 'unavailable', capabilities };
+}
 
 export const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
